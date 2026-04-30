@@ -3,6 +3,8 @@
 Automated Loot Distribution for Eluna
 LootArbiter identifies player specializations and automatically moves loot to the person receiving the largest stat upgrade.
 
+***Requires Azerothcore and Azerothcore ALE***
+
 
 **Core Features**
 
