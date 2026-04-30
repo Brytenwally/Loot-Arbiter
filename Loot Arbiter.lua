@@ -4,6 +4,50 @@ local COLOR_PREFIX = "|cff00ff00[SpecArbiter]|r "
 -- [1] DATA MAPS
 local STAT_ID_MAP = { [4]="STR", [3]="AGI", [7]="STA", [5]="INT", [6]="SPI", [38]="AP", [45]="SP", [31]="HIT", [32]="CRIT", [36]="HASTE", [37]="EXP", [12]="DEF", [13]="DODGE", [14]="PARRY", [15]="BLOCK" }
 
+-- Helper to check if a spec should be compared against both weapon slots
+local function CanDualWield(spec)
+    local dwSpecs = {
+        ["Hunter"] = true,
+        ["Rogue"] = true,
+        ["Shamy Enh"] = true,
+        ["War Fury"] = true,
+        ["DK Frost"] = true
+    }
+    return dwSpecs[spec] or false
+end
+
+-- Maps Weapon Subclasses to Skill IDs for HasSkill check
+local WEAPON_SKILL_MAP = {
+    [0]  = 44,  -- One-Handed Axes
+    [1]  = 172, -- Two-Handed Axes
+    [2]  = 45,  -- Bows
+    [3]  = 46,  -- Guns
+    [4]  = 54,  -- One-Handed Maces
+    [5]  = 160, -- Two-Handed Maces
+    [6]  = 229, -- Polearms
+    [7]  = 55,  -- One-Handed Swords
+    [8]  = 172, -- Two-Handed Swords
+    [10] = 136, -- Staves
+    [13] = 473, -- Fist Weapons
+    [15] = 173, -- Daggers
+    [18] = 226, -- Crossbows
+    [19] = 166, -- Wands
+}
+
+-- Maps Player Class ID to their maximum allowed Armor Subclass
+local MAX_ARMOR_MAP = {
+    [1]  = 4, -- Warrior: Plate
+    [2]  = 4, -- Paladin: Plate
+    [3]  = 3, -- Hunter: Mail
+    [4]  = 2, -- Rogue: Leather
+    [5]  = 1, -- Priest: Cloth
+    [6]  = 4, -- DK: Plate
+    [7]  = 3, -- Shaman: Mail
+    [8]  = 1, -- Mage: Cloth
+    [9]  = 1, -- Warlock: Cloth
+    [11] = 2, -- Druid: Leather
+}
+
 local INV_TO_SLOT = {
     [1]  = 0,  -- Head
     [2]  = 1,  -- Neck
@@ -22,6 +66,8 @@ local INV_TO_SLOT = {
     [16] = 14, -- Back
     [17] = 15, -- Two-Hand (Slot 15)
     [20] = 4,  -- Robe
+    [21] = 15, -- Main Hand
+    [22] = 16, -- Off Hand
 }
 
 -- [2] WEIGHT TABLES
@@ -144,19 +190,26 @@ local function ExecuteDelayedTransfer(wGUID, tGUID, itemEntry, improvement)
     local winner = GetPlayerByGUID(wGUID)
     local target = GetPlayerByGUID(tGUID)
 
-    -- Safety check: ensure both players are still online
     if not winner or not target then return end
 
-    -- Re-scan the inventory for the item (post-forging)
     local item = winner:GetItemByEntry(itemEntry)
     
     if item then
         local itemName = item:GetName()
         local group = winner:GetGroup()
+        local suffixId = item:GetRandomSuffix() 
         
-        print(LOG_PREFIX .. "Executing delay-safe transfer: " .. itemName)
+        print(LOG_PREFIX .. "Executing transfer: " .. itemName .. " to " .. target:GetName())
 
-        -- Broadcast to the group
+        local addedItem = target:AddItem(itemEntry, 1, suffixId)
+
+        if not addedItem then
+            SendMail("Arbiter Loot Distribution", "Your bags were full. Here is your upgrade: " .. itemName, target:GetGUIDLow(), 0, 61, 0, 0, 0, itemEntry, 1, suffixId)
+            target:SendBroadcastMessage(COLOR_PREFIX .. "Your bags were full! |cff00ff00" .. itemName .. "|r has been sent to your mail.")
+        end
+
+        winner:RemoveItem(item, 1)
+
         if group then
             local announce = string.format(COLOR_PREFIX .. "Arbiter: %s (+%.2f) transferred to %s.", itemName, improvement, target:GetName())
             local members = group:GetMembers()
@@ -164,10 +217,6 @@ local function ExecuteDelayedTransfer(wGUID, tGUID, itemEntry, improvement)
                 member:SendBroadcastMessage(announce)
             end
         end
-
-        -- Finalize movement[cite: 2]
-        winner:RemoveItem(item, 1)
-        target:AddItem(itemEntry, 1)
     end
 end
 
@@ -179,8 +228,7 @@ local function OnGroupRollReward(event, winner, item, count, voteType, roll)
     local itemEntry = item:GetEntry()
     local _, template = GetScoreByEntry(itemEntry, MASTER_WEIGHTS["Warlock"])
     
-    -- Only process Gear/Weapons[cite: 2]
-    if not template or (template.class ~= 2 and template.class ~= 4) then return end
+    if not template then return end
 
     local bestPlayer = nil
     local maxImprovement = 0
@@ -190,15 +238,70 @@ local function OnGroupRollReward(event, winner, item, count, voteType, roll)
         if member and member:IsInWorld() then
             local spec = GetHeuristicSpec(member)
             local weights = MASTER_WEIGHTS[spec]
+            local classId = member:GetClass()
 
             if weights then
-                local isInvalid2H = (template.InventoryType == 17 and (spec == "Pally Prot" or spec == "War Prot" or spec == "DK Frost"))
-                
-                if not isInvalid2H then
+                local isEligible = true
+
+                -- [A] WEAPON SKILL CHECK[cite: 2, 3]
+                if template.class == 2 then
+                    local requiredSkill = WEAPON_SKILL_MAP[template.subclass]
+                    if requiredSkill and not member:HasSkill(requiredSkill) then
+                        isEligible = false
+                    end
+                end
+
+                -- [B] ARMOR TYPE CHECK[cite: 3]
+                if template.class == 4 then
+                    local maxArmor = MAX_ARMOR_MAP[classId] or 1
+                    if template.subclass > maxArmor then
+                        isEligible = false
+                    end
+                end
+
+                -- [C] SPELL POWER SANITY CHECK[cite: 2, 3]
+                -- Prevents physical DPS from winning pure caster daggers
+                local hasSP = false
+                for i = 1, 10 do
+                    if template["stat_type"..i] == 45 then hasSP = true break end
+                end
+                if hasSP and (weights.SP or 0) <= 0 then
+                    isEligible = false
+                end
+
+                -- [D] SPEC OPTIMIZATION (Hardcoded Exclusions)[cite: 2, 3]
+                local isBadOpt = (template.InventoryType == 17 and 
+                    (spec == "Pally Prot" or spec == "War Prot" or spec == "DK Frost" or spec == "Shamy Enh"))
+
+                -- FINAL VALIDATION AND SCORING[cite: 2, 3]
+                if isEligible and not isBadOpt then
                     local lootedScore = GetScoreByEntry(itemEntry, weights)
-                    local slot = INV_TO_SLOT[template.InventoryType]
-                    local currentItem = slot and member:GetEquippedItemBySlot(slot)
-                    local currentScore = currentItem and GetScoreByEntry(currentItem:GetEntry(), weights) or 0
+                    local currentScore = 0
+
+                    -- SMART SLOT COMPARISON[cite: 3]
+                    -- InventoryType: 13 (One-Hand), 21 (Main Hand), 22 (Off Hand)
+                    if (template.InventoryType == 13 or template.InventoryType == 21 or template.InventoryType == 22) and CanDualWield(spec) then
+                        local mhItem = member:GetEquippedItemBySlot(15)
+                        local ohItem = member:GetEquippedItemBySlot(16)
+                        
+                        local mhScore = mhItem and GetScoreByEntry(mhItem:GetEntry(), weights) or 0
+                        local ohScore = ohItem and GetScoreByEntry(ohItem:GetEntry(), weights) or 0
+                        
+                        if template.InventoryType == 21 then
+                            currentScore = mhScore
+                        elseif template.InventoryType == 22 then
+                            currentScore = ohScore
+                        else
+                            -- Generic One-Hand: Compare against the lower score to find the biggest upgrade
+                            currentScore = math.min(mhScore, ohScore)
+                        end
+                    else
+                        -- Standard slot comparison
+                        local slot = INV_TO_SLOT[template.InventoryType]
+                        local currentItem = slot and member:GetEquippedItemBySlot(slot)
+                        currentScore = currentItem and GetScoreByEntry(currentItem:GetEntry(), weights) or 0
+                    end
+
                     local improvement = lootedScore - currentScore
                     
                     if improvement > maxImprovement then
@@ -210,20 +313,19 @@ local function OnGroupRollReward(event, winner, item, count, voteType, roll)
         end
     end
 
-    -- Trigger 200ms delay to avoid Forging.lua collision[cite: 2]
     if bestPlayer and bestPlayer:GetGUID() ~= winner:GetGUID() and maxImprovement > 0 then
         local wGUID = winner:GetGUID()
         local tGUID = bestPlayer:GetGUID()
-        
-        -- If CreateLuaEvent fails, this build likely uses 'RegisterEvent' or 'CreateEvent'[cite: 2]
-        -- We use 200ms delay, 1 execution[cite: 2]
+        print(LOG_PREFIX .. "Queuing transfer for " .. item:GetName())
         CreateLuaEvent(function() 
             ExecuteDelayedTransfer(wGUID, tGUID, itemEntry, maxImprovement) 
         end, 200, 1)
+    else
+        print(LOG_PREFIX .. "No transfer needed for " .. item:GetName())
     end
 end
 
--- [6] SIMPLIFIED CHECK COMMAND
+-- [7] SIMPLIFIED CHECK COMMAND
 local function OnPlayerChat(event, player, msg, type, lang)
     if (msg:lower() == "check") then
         local spec = GetHeuristicSpec(player)
