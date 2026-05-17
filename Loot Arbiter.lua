@@ -1,9 +1,10 @@
 local LOG_PREFIX = "[SpecArbiter] "
 local COLOR_PREFIX = "|cff00ff00[SpecArbiter]|r "
 
--- Minimum percentage upgrade required to trigger a transfer. Tune to taste:
--- 5.0 = ignore trivial sidegrades; raise to 10+ for stricter, lower for chattier.
-local MIN_IMPROVEMENT_PCT = 5.0
+-- Minimum percentage upgrade required to trigger a transfer. Set low because a
+-- 1% gain on near-BiS gear is still a real upgrade worth arbitrating; the
+-- floor below keeps low-geared players from flooding the chat with redirects.
+local MIN_IMPROVEMENT_PCT = 1.0
 
 -- Floors currentScore in the % calculation at this fraction of the looted item's
 -- score. Prevents an empty slot or a level-1 grey from inflating % into the
