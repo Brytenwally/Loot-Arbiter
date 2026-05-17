@@ -99,13 +99,102 @@ local MASTER_WEIGHTS = {
     ["War Prot"]    = {STR=0.33, AGI=0.59, STA=1, AP=0.34, HIT=0.67, CRIT=0.28, HASTE=0.21, EXP=0.94, DEF=0.81, DODGE=0.7, PARRY=0.58, BLOCK=0.59, WPW=0.1},
 }
 
--- [3] HEURISTIC SPEC IDENTIFIER
+-- [3] TALENT-TREE SPEC IDENTIFIER
+-- Each entry lists representative talent spell IDs heavily invested in by that spec.
+-- The detector counts how many of these the player has and picks the spec with the
+-- highest count. Extend these lists for sharper detection.
+local SPEC_TALENT_SIGNATURES = {
+    -- Warrior
+    ["War Arms"]    = {12294, 12834, 46924},  -- Mortal Strike, Deep Wounds, Bladestorm
+    ["War Fury"]    = {23881, 12950, 46917},  -- Bloodthirst, Unbridled Wrath, Titan's Grip
+    ["War Prot"]    = {23922, 12975, 46968},  -- Shield Slam, Last Stand, Shockwave
+    -- Paladin
+    ["Pally Holy"]  = {20210, 31821, 53563},  -- Illumination, Aura Mastery, Beacon of Light
+    ["Pally Prot"]  = {20911, 31935, 53595},  -- Blessing of Sanctuary, Avenger's Shield, Hammer of the Righteous
+    ["Pally Ret"]   = {20049, 31876, 53385},  -- Vengeance, Sanctified Retribution, Divine Storm
+    -- Death Knight
+    ["DK Blood"]    = {48982, 49016, 49028},  -- Rune Tap, Hysteria, Dancing Rune Weapon
+    ["DK Frost"]    = {51271, 49203, 51128},  -- Unbreakable Armor, Hungering Cold, Killing Machine
+    ["DK Unhol"]    = {52143, 49206, 49530},  -- Master of Ghouls, Summon Gargoyle, Sudden Doom
+    -- Shaman
+    ["Shamy Ele"]   = {16039, 16578, 51490},  -- Convection, Elemental Focus, Thunderstorm
+    ["Shamy Enh"]   = {17364, 30802, 51533},  -- Stormstrike, Unleashed Rage, Feral Spirit
+    ["Shamy Resto"] = {16182, 974,   61295},  -- Improved Reincarnation, Earth Shield, Riptide
+    -- Priest
+    ["Prst Disc"]   = {33206, 47509, 47540},  -- Pain Suppression, Divine Aegis, Penance
+    ["Prst Holy"]   = {14913, 33076, 47788},  -- Holy Specialization, Prayer of Mending, Guardian Spirit
+    ["Prst Shad"]   = {15270, 15487, 47585},  -- Spirit Tap, Silence, Dispersion
+    -- Mage
+    ["Mage Arcane"] = {54490, 31571, 44425},  -- Incanter's Absorption, Arcane Power, Arcane Barrage
+    ["Mage Fire"]   = {11069, 11129, 44457},  -- Improved Scorch, Combustion, Living Bomb
+    ["Mage Frost"]  = {31670, 11958, 44572},  -- Arctic Reach, Cold Snap, Deep Freeze
+    -- Druid (Cat vs Bear share Feral tree; resolve via form-specific talents)
+    ["Druid Bal"]   = {24858, 33831, 48505},  -- Moonkin Form, Force of Nature, Starfall
+    ["Druid Cat"]   = {48492, 16972, 50334},  -- King of the Jungle, Predatory Strikes, Berserk
+    ["Druid Bear"]  = {16929, 57878, 50334},  -- Thick Hide, Natural Reaction, Berserk
+    ["Druid Resto"] = {17063, 33891, 48438},  -- Naturalist, Tree of Life, Wild Growth
+    -- Single-spec classes (all three trees collapse to one weight set)
+    ["Hunter"]      = {53270, 53209, 53301},  -- BM, MM, Surv capstones
+    ["Rogue"]       = {51662, 51690, 51713},  -- Assn, Combat, Sub capstones
+    ["Warlock"]     = {48181, 47241, 50796},  -- Aff, Demo, Destro capstones
+}
+
+-- Class ID -> candidate spec names to score against
+local CLASS_SPEC_CANDIDATES = {
+    [1]  = {"War Arms", "War Fury", "War Prot"},
+    [2]  = {"Pally Holy", "Pally Prot", "Pally Ret"},
+    [3]  = {"Hunter"},
+    [4]  = {"Rogue"},
+    [5]  = {"Prst Disc", "Prst Holy", "Prst Shad"},
+    [6]  = {"DK Blood", "DK Frost", "DK Unhol"},
+    [7]  = {"Shamy Ele", "Shamy Enh", "Shamy Resto"},
+    [8]  = {"Mage Arcane", "Mage Fire", "Mage Frost"},
+    [9]  = {"Warlock"},
+    [11] = {"Druid Bal", "Druid Cat", "Druid Bear", "Druid Resto"},
+}
+
+local function CountTalentMatches(player, talentList, activeSpec)
+    local count = 0
+    for _, spellId in ipairs(talentList) do
+        if player:HasTalent(spellId, activeSpec) then
+            count = count + 1
+        end
+    end
+    return count
+end
+
+local function GetSpecByTalents(player)
+    local classId = player:GetClass()
+    local candidates = CLASS_SPEC_CANDIDATES[classId]
+    if not candidates then return nil end
+
+    local activeSpec = player:GetActiveSpec() or 0
+
+    local bestSpec, bestCount = nil, 0
+    for _, spec in ipairs(candidates) do
+        local sig = SPEC_TALENT_SIGNATURES[spec]
+        if sig then
+            local matches = CountTalentMatches(player, sig, activeSpec)
+            if matches > bestCount then
+                bestCount = matches
+                bestSpec = spec
+            end
+        end
+    end
+
+    return bestSpec
+end
+
 local function GetHeuristicSpec(player)
+    -- Primary: invested talent tree wins.
+    local byTalents = GetSpecByTalents(player)
+    if byTalents then return byTalents end
+
+    -- Fallback: stat/gear heuristic for fresh chars with no points yet.
     local classId = player:GetClass()
     local mainHand = player:GetEquippedItemBySlot(15)
     local offHand = player:GetEquippedItemBySlot(16)
     local agi, int, str = player:GetStat(1), player:GetStat(3), player:GetStat(0)
-    local activeSpec = player:GetActiveSpec() or 0
 
     if classId == 9 then return "Warlock" end
     if classId == 4 then return "Rogue" end
@@ -113,31 +202,14 @@ local function GetHeuristicSpec(player)
 
     if classId == 7 then
         if agi > player:GetStat(4) then return "Shamy Enh" end
-        if player:HasTalent(16039, activeSpec) then return "Shamy Ele" end
-        if player:HasTalent(16182, activeSpec) then return "Shamy Resto" end
         return "Shamy Ele"
     end
 
-    if classId == 5 then
-        if player:HasTalent(47540, activeSpec) then return "Prst Disc" end
-        if player:HasTalent(15270, activeSpec) then return "Prst Shad" end
-        if player:HasTalent(14913, activeSpec) then return "Prst Holy" end
-        return "Prst Disc"
-    end
-
-    if classId == 8 then
-        if player:HasTalent(54490, activeSpec) then return "Mage Arcane" end
-        if player:HasTalent(11069, activeSpec) then return "Mage Fire" end
-        if player:HasTalent(31670, activeSpec) then return "Mage Frost" end
-        return "Mage Arcane"
-    end
+    if classId == 5 then return "Prst Disc" end
+    if classId == 8 then return "Mage Arcane" end
 
     if classId == 11 then
-        if agi > int then
-            if player:HasTalent(16929, activeSpec) then return "Druid Bear" end
-            return "Druid Cat"
-        end
-        if player:HasTalent(17063, activeSpec) then return "Druid Resto" end
+        if agi > int then return "Druid Cat" end
         return "Druid Bal"
     end
 
@@ -148,7 +220,6 @@ local function GetHeuristicSpec(player)
     end
 
     if classId == 6 then
-        if player:HasTalent(52143, activeSpec) then return "DK Unhol" end
         if mainHand and offHand and offHand:GetClass() == 2 then return "DK Frost" end
         return "DK Blood"
     end
