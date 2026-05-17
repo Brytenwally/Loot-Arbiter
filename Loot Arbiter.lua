@@ -1,6 +1,15 @@
 local LOG_PREFIX = "[SpecArbiter] "
 local COLOR_PREFIX = "|cff00ff00[SpecArbiter]|r "
 
+-- Minimum percentage upgrade required to trigger a transfer. Tune to taste:
+-- 5.0 = ignore trivial sidegrades; raise to 10+ for stricter, lower for chattier.
+local MIN_IMPROVEMENT_PCT = 5.0
+
+-- Floors currentScore in the % calculation at this fraction of the looted item's
+-- score. Prevents an empty slot or a level-1 grey from inflating % into the
+-- thousands and stealing loot from a player making a real upgrade.
+local TRIVIAL_BASELINE_FLOOR = 0.10
+
 -- [1] DATA MAPS
 local STAT_ID_MAP = { [4]="STR", [3]="AGI", [7]="STA", [5]="INT", [6]="SPI", [38]="AP", [45]="SP", [31]="HIT", [32]="CRIT", [36]="HASTE", [37]="EXP", [12]="DEF", [13]="DODGE", [14]="PARRY", [15]="BLOCK" }
 
@@ -282,7 +291,7 @@ local function ExecuteDelayedTransfer(wGUID, tGUID, itemEntry, improvement)
         winner:RemoveItem(item, 1)
 
         if group then
-            local announce = string.format(COLOR_PREFIX .. "Arbiter: %s (+%.2f) transferred to %s.", itemName, improvement, target:GetName())
+            local announce = string.format(COLOR_PREFIX .. "Arbiter: %s (+%.1f%%) transferred to %s.", itemName, improvement, target:GetName())
             local members = group:GetMembers()
             for _, member in ipairs(members) do
                 member:SendBroadcastMessage(announce)
@@ -302,7 +311,7 @@ local function OnGroupRollReward(event, winner, item, count, voteType, roll)
     if not template then return end
 
     local bestPlayer = nil
-    local maxImprovement = 0
+    local maxPctImprovement = 0
     local members = group:GetMembers()
 
     for _, member in ipairs(members) do
@@ -373,10 +382,16 @@ local function OnGroupRollReward(event, winner, item, count, voteType, roll)
                         currentScore = currentItem and GetScoreByEntry(currentItem:GetEntry(), weights) or 0
                     end
 
-                    local improvement = lootedScore - currentScore
-                    
-                    if improvement > maxImprovement then
-                        maxImprovement = improvement
+                    -- Percentage improvement, with currentScore floored so empty
+                    -- slots and junk baselines can't blow the ratio to infinity.
+                    local denom = math.max(currentScore, lootedScore * TRIVIAL_BASELINE_FLOOR)
+                    local pctImprovement = 0
+                    if denom > 0 then
+                        pctImprovement = ((lootedScore - currentScore) / denom) * 100
+                    end
+
+                    if pctImprovement > maxPctImprovement then
+                        maxPctImprovement = pctImprovement
                         bestPlayer = member
                     end
                 end
@@ -384,12 +399,12 @@ local function OnGroupRollReward(event, winner, item, count, voteType, roll)
         end
     end
 
-    if bestPlayer and bestPlayer:GetGUID() ~= winner:GetGUID() and maxImprovement > 0 then
+    if bestPlayer and bestPlayer:GetGUID() ~= winner:GetGUID() and maxPctImprovement >= MIN_IMPROVEMENT_PCT then
         local wGUID = winner:GetGUID()
         local tGUID = bestPlayer:GetGUID()
         print(LOG_PREFIX .. "Queuing transfer for " .. item:GetName())
-        CreateLuaEvent(function() 
-            ExecuteDelayedTransfer(wGUID, tGUID, itemEntry, maxImprovement) 
+        CreateLuaEvent(function()
+            ExecuteDelayedTransfer(wGUID, tGUID, itemEntry, maxPctImprovement)
         end, 200, 1)
     else
         print(LOG_PREFIX .. "No transfer needed for " .. item:GetName())
