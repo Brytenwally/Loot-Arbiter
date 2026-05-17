@@ -19,6 +19,7 @@ Safety Filters: Blocks illogical transfers, such as 2H weapons going to Shield-b
 
 
 Drop Loot Arbiter.lua into your lua_scripts folder.
+(Optional) Drop bis_data.lua alongside it to enable the BiS override pass — items on a spec's BiS/Alt list will route to that spec ahead of pure stat-weight comparison. Regenerate from upstream with `python3 tools/build_bis_data.py` (pulls from lgallucci/LoonBestInSlot WotLK + TBC branches).
 (Optional) Edit MASTER_WEIGHTS at the top of the file to tune your scaling.
 Reload Eluna or restart your worldserver.
 

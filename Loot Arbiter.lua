@@ -311,8 +311,7 @@ local function OnGroupRollReward(event, winner, item, count, voteType, roll)
     
     if not template then return end
 
-    local bestPlayer = nil
-    local maxPctImprovement = 0
+    local candidates = {}
     local members = group:GetMembers()
 
     for _, member in ipairs(members) do
@@ -324,7 +323,7 @@ local function OnGroupRollReward(event, winner, item, count, voteType, roll)
             if weights then
                 local isEligible = true
 
-                -- [A] WEAPON SKILL CHECK[cite: 2, 3]
+                -- [A] WEAPON SKILL CHECK
                 if template.class == 2 then
                     local requiredSkill = WEAPON_SKILL_MAP[template.subclass]
                     if requiredSkill and not member:HasSkill(requiredSkill) then
@@ -332,7 +331,7 @@ local function OnGroupRollReward(event, winner, item, count, voteType, roll)
                     end
                 end
 
-                -- [B] ARMOR TYPE CHECK[cite: 3]
+                -- [B] ARMOR TYPE CHECK
                 if template.class == 4 then
                     local maxArmor = MAX_ARMOR_MAP[classId] or 1
                     if template.subclass > maxArmor then
@@ -340,8 +339,7 @@ local function OnGroupRollReward(event, winner, item, count, voteType, roll)
                     end
                 end
 
-                -- [C] SPELL POWER SANITY CHECK[cite: 2, 3]
-                -- Prevents physical DPS from winning pure caster daggers
+                -- [C] SPELL POWER SANITY CHECK
                 local hasSP = false
                 for i = 1, 10 do
                     if template["stat_type"..i] == 45 then hasSP = true break end
@@ -350,62 +348,87 @@ local function OnGroupRollReward(event, winner, item, count, voteType, roll)
                     isEligible = false
                 end
 
-                -- [D] SPEC OPTIMIZATION (Hardcoded Exclusions)[cite: 2, 3]
-                local isBadOpt = (template.InventoryType == 17 and 
+                -- [D] SPEC OPTIMIZATION (Hardcoded Exclusions)
+                local isBadOpt = (template.InventoryType == 17 and
                     (spec == "Pally Prot" or spec == "War Prot" or spec == "DK Frost" or spec == "Shamy Enh"))
 
-                -- FINAL VALIDATION AND SCORING[cite: 2, 3]
                 if isEligible and not isBadOpt then
                     local lootedScore = GetScoreByEntry(itemEntry, weights)
                     local currentScore = 0
 
-                    -- SMART SLOT COMPARISON[cite: 3]
-                    -- InventoryType: 13 (One-Hand), 21 (Main Hand), 22 (Off Hand)
                     if (template.InventoryType == 13 or template.InventoryType == 21 or template.InventoryType == 22) and CanDualWield(spec) then
                         local mhItem = member:GetEquippedItemBySlot(15)
                         local ohItem = member:GetEquippedItemBySlot(16)
-                        
+
                         local mhScore = mhItem and GetScoreByEntry(mhItem:GetEntry(), weights) or 0
                         local ohScore = ohItem and GetScoreByEntry(ohItem:GetEntry(), weights) or 0
-                        
+
                         if template.InventoryType == 21 then
                             currentScore = mhScore
                         elseif template.InventoryType == 22 then
                             currentScore = ohScore
                         else
-                            -- Generic One-Hand: Compare against the lower score to find the biggest upgrade
                             currentScore = math.min(mhScore, ohScore)
                         end
                     else
-                        -- Standard slot comparison
                         local slot = INV_TO_SLOT[template.InventoryType]
                         local currentItem = slot and member:GetEquippedItemBySlot(slot)
                         currentScore = currentItem and GetScoreByEntry(currentItem:GetEntry(), weights) or 0
                     end
 
-                    -- Percentage improvement, with currentScore floored so empty
-                    -- slots and junk baselines can't blow the ratio to infinity.
                     local denom = math.max(currentScore, lootedScore * TRIVIAL_BASELINE_FLOOR)
                     local pctImprovement = 0
                     if denom > 0 then
                         pctImprovement = ((lootedScore - currentScore) / denom) * 100
                     end
 
-                    if pctImprovement > maxPctImprovement then
-                        maxPctImprovement = pctImprovement
-                        bestPlayer = member
+                    if pctImprovement > 0 then
+                        table.insert(candidates, {member = member, spec = spec, pct = pctImprovement})
                     end
                 end
             end
         end
     end
 
-    if bestPlayer and bestPlayer:GetGUID() ~= winner:GetGUID() and maxPctImprovement >= MIN_IMPROVEMENT_PCT then
+    -- BiS override pass: if the item is on any candidate's BiS/Alt list, only
+    -- BiS-eligible candidates compete (best % among them wins). Falls through
+    -- to normal % scoring if nobody in the group has it as BiS.
+    local bisList = (_G.LootArbiter_BIS_OVERRIDES or {})[itemEntry]
+    local bisLookup = nil
+    if bisList then
+        bisLookup = {}
+        for _, s in ipairs(bisList) do bisLookup[s] = true end
+    end
+
+    local bestPlayer, bestPct, bisWin = nil, 0, false
+    if bisLookup then
+        for _, c in ipairs(candidates) do
+            if bisLookup[c.spec] and c.pct > bestPct then
+                bestPct = c.pct
+                bestPlayer = c.member
+                bisWin = true
+            end
+        end
+    end
+    if not bestPlayer then
+        for _, c in ipairs(candidates) do
+            if c.pct > bestPct then
+                bestPct = c.pct
+                bestPlayer = c.member
+            end
+        end
+    end
+
+    -- BiS matches bypass the min-% threshold; even a tiny upgrade on a known
+    -- BiS piece is worth routing.
+    local meetsThreshold = bisWin or bestPct >= MIN_IMPROVEMENT_PCT
+
+    if bestPlayer and bestPlayer:GetGUID() ~= winner:GetGUID() and meetsThreshold then
         local wGUID = winner:GetGUID()
         local tGUID = bestPlayer:GetGUID()
-        print(LOG_PREFIX .. "Queuing transfer for " .. item:GetName())
+        print(LOG_PREFIX .. "Queuing transfer for " .. item:GetName() .. (bisWin and " [BiS]" or ""))
         CreateLuaEvent(function()
-            ExecuteDelayedTransfer(wGUID, tGUID, itemEntry, maxPctImprovement)
+            ExecuteDelayedTransfer(wGUID, tGUID, itemEntry, bestPct)
         end, 200, 1)
     else
         print(LOG_PREFIX .. "No transfer needed for " .. item:GetName())
